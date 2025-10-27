@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "anki": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/michaelkrech/_work/anki-mcp-server",
+        "run",
+        "anki-mcp-server"
+      ]
+    }
+  }
+}
