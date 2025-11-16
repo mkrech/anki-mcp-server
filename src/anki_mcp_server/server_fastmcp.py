@@ -1,8 +1,11 @@
 """Anki MCP Server implementation with FastMCP."""
 
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
+from docling.document_converter import DocumentConverter
 from fastmcp import FastMCP
 from mcp.types import TextContent
 
@@ -372,8 +375,6 @@ async def get_note_type_schema(model_name: str) -> str:
     templates = await client.get_model_templates(model_name)
     styling = await client.get_model_styling(model_name)
 
-    import json
-
     return json.dumps(
         {
             "modelName": model_name,
@@ -383,3 +384,246 @@ async def get_note_type_schema(model_name: str) -> str:
         },
         indent=2,
     )
+
+
+# PDF Conversion Tools
+
+
+async def _convert_pdf_to_docling_raw_impl(
+    source: str,
+    output_dir: str | None = None
+) -> str:
+    """Convert PDF to Docling raw JSON format.
+    
+    Internal implementation that performs the actual conversion.
+    
+    Args:
+        source: Path to source PDF file
+        output_dir: Output directory for Docling raw JSON files (defaults to ANKI_MCP_DOCLING_RAW_DIR env var)
+        
+    Returns:
+        JSON string with conversion result and file paths
+    """
+    import os
+    
+    # Use environment variable if output_dir not provided
+    if output_dir is None:
+        output_dir = os.getenv("ANKI_MCP_DOCLING_RAW_DIR", "data/input/intermediate/docling_raw/")
+    # Validate source exists
+    source_path = Path(source)
+    if not source_path.exists():
+        return json.dumps({
+            "success": False,
+            "error": f"Source PDF not found: {source}"
+        }, indent=2)
+    
+    # Create output directory
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Convert PDF using Docling
+        converter = DocumentConverter()
+        result = converter.convert(str(source_path))
+        
+        # Get the converted document
+        doc = result.document
+        
+        # Generate output filenames
+        basename = source_path.stem
+        json_file = output_path / f"{basename}_docling.json"
+        md_file = output_path / f"{basename}_docling.md"
+        
+        # Save as JSON
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(doc.export_to_dict(), f, indent=2, ensure_ascii=False)
+        
+        # Save as Markdown
+        with open(md_file, "w", encoding="utf-8") as f:
+            f.write(doc.export_to_markdown())
+        
+        return json.dumps({
+            "success": True,
+            "source": str(source_path),
+            "json_file": str(json_file),
+            "md_file": str(md_file),
+            "message": f"Converted {source_path.name} to Docling format",
+            "pages": len(doc.pages) if hasattr(doc, "pages") else None
+        }, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Failed to convert PDF: {e}", exc_info=True)
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "source": str(source)
+        }, indent=2)
+
+
+@mcp.tool()
+async def convert_pdf_to_docling_raw(
+    source: str,
+    output_dir: str | None = None
+) -> str:
+    """Convert PDF to Docling raw JSON format.
+    
+    Uses Docling DocumentConverter to convert PDF directly to raw JSON and Markdown.
+    Saves both formats to the output directory.
+    
+    Args:
+        source: Path to source PDF file
+        output_dir: Output directory for Docling raw JSON files (defaults to ANKI_MCP_DOCLING_RAW_DIR env var or data/input/intermediate/docling_raw/)
+        
+    Returns:
+        JSON string with conversion result and file paths
+    """
+    return await _convert_pdf_to_docling_raw_impl(source, output_dir)
+
+
+async def _convert_docling_raw_to_intermediate_impl(
+    source: str,
+    output_dir: str | None = None
+) -> str:
+    """Internal implementation for converting Docling raw to intermediate format."""
+    import re
+    import os
+    
+    # Use environment variable if output_dir not provided
+    if output_dir is None:
+        output_dir = os.getenv("ANKI_MCP_INTERMEDIATE_DIR", "data/input/intermediate/")
+    
+    # Validate source exists
+    source_path = Path(source)
+    if not source_path.exists():
+        return json.dumps({
+            "success": False,
+            "error": f"Source file not found: {source}"
+        }, indent=2)
+    
+    # Create output directory
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Load Docling raw JSON
+        with open(source_path, 'r', encoding='utf-8') as f:
+            docling_dict = json.load(f)
+        
+        # Extract basename
+        base_name = source_path.stem.replace('_docling', '')
+        
+        # Extract sections
+        sections = []
+        texts = docling_dict.get('texts', [])
+        header_indices = [i for i, t in enumerate(texts) if t.get('label') == 'section_header']
+        
+        if header_indices:
+            # Standard processing with section headers
+            current_section_id = 0
+            
+            for header_idx_pos, text_idx in enumerate(header_indices):
+                text_item = texts[text_idx]
+                
+                level = text_item.get('level', 1)
+                title = text_item.get('text', f"Section {current_section_id}")
+                
+                # Page number from prov
+                prov = text_item.get('prov', [])
+                page_num = prov[0].get('page_no', 1) if prov else 1
+                
+                # Content: collect text until next header
+                next_header_idx = header_indices[header_idx_pos + 1] if header_idx_pos + 1 < len(header_indices) else len(texts)
+                content_items = texts[text_idx + 1:next_header_idx]
+                content = '\n\n'.join(item.get('text', '') for item in content_items if item.get('text'))
+                
+                section_id = f"{base_name}_sec_{current_section_id}"
+                section = {
+                    "id": section_id,
+                    "title": title,
+                    "content": content,
+                    "level": level,
+                    "page": page_num,
+                    "parent_id": None,
+                    "chapter": None,
+                    "section_number": None,
+                    "image_path": f"data/input/intermediate/slide_images/{base_name}/pgm_{base_name}_slide_{page_num}.png"
+                }
+                
+                sections.append(section)
+                current_section_id += 1
+        else:
+            # Fallback: single section with all content
+            full_text = '\n\n'.join(item.get('text', '') for item in texts if item.get('text'))
+            page_num = 1
+            if texts and texts[0].get('prov'):
+                page_num = texts[0]['prov'][0].get('page_no', 1)
+            
+            section = {
+                "id": f"{base_name}_sec_0",
+                "title": base_name,
+                "content": full_text,
+                "level": 1,
+                "page": page_num,
+                "parent_id": None,
+                "chapter": None,
+                "section_number": None,
+                "image_path": f"data/input/intermediate/slide_images/{base_name}/pgm_{base_name}_slide_{page_num}.png"
+            }
+            sections.append(section)
+        
+        # Create structured document
+        doc_dict = {
+            "file_path": f"data/pdfs/{base_name}.pdf",
+            "metadata": {
+                "source": "docling",
+                "docling_file": str(source_path),
+                "base_name": base_name
+            },
+            "sections": sections,
+            "tables": [],
+            "stats": {
+                "total_sections": len(sections),
+                "total_tables": 0
+            }
+        }
+        
+        # Save structured JSON
+        output_file = output_path / f"{base_name}.json"
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(doc_dict, f, indent=2, ensure_ascii=False)
+        
+        return json.dumps({
+            "success": True,
+            "source": str(source_path),
+            "output_file": str(output_file),
+            "sections": len(sections),
+            "message": f"Converted {source_path.name} to structured format"
+        }, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Failed to convert Docling raw to intermediate: {e}", exc_info=True)
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "source": str(source)
+        }, indent=2)
+
+
+@mcp.tool()
+async def convert_docling_raw_to_intermediate(
+    source: str,
+    output_dir: str | None = None
+) -> str:
+    """Convert Docling raw JSON to structured intermediate JSON format.
+    
+    Extracts sections, hierarchy, and metadata from Docling raw JSON and
+    converts it to the structured format used for flashcard generation.
+    
+    Args:
+        source: Path to Docling raw JSON file (*_docling.json)
+        output_dir: Output directory for structured JSON files (defaults to ANKI_MCP_INTERMEDIATE_DIR env var or data/input/intermediate/)
+        
+    Returns:
+        JSON string with conversion result and file paths
+    """
+    return await _convert_docling_raw_to_intermediate_impl(source, output_dir)

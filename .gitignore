@@ -25,3 +25,4 @@ htmlcov/
 .ruff_cache/
 *.log
 .DS_Store
+data/

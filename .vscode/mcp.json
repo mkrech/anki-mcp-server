@@ -7,6 +7,18 @@
         "/Users/michaelkrech/_work/anki-mcp-server",
         "run",
         "anki-mcp-server"
+      ],
+      "env": {
+        "ANKI_MCP_PDF_DIR": "/Users/michaelkrech/_work/anki-mcp-server/data/input/pdfs/pgm",
+        "ANKI_MCP_DOCLING_RAW_DIR": "/Users/michaelkrech/_work/anki-mcp-server/data/input/intermediate/docling_raw",
+        "ANKI_MCP_INTERMEDIATE_DIR": "/Users/michaelkrech/_work/anki-mcp-server/data/input/intermediate"
+      }
+    },
+    "docling": {
+      "command": "uvx",
+      "args": [
+        "--from=docling-mcp",
+        "docling-mcp-server"
       ]
     }
   }
